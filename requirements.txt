@@ -1,0 +1,7 @@
+requests
+anthropic
+python-telegram-bot
+apscheduler
+pandas
+python-dotenv
+yfinance

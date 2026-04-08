@@ -24,13 +24,11 @@ TV_USERNAME      = os.getenv("TV_USERNAME")
 TV_PASSWORD      = os.getenv("TV_PASSWORD")
 TV_SESSION       = os.getenv("TV_SESSION")
 
-TV_CHART_ID = "tSivPh6K"
-
 CHART_URLS = {
-    "XAUUSD": "https://www.tradingview.com/chart/" + TV_CHART_ID + "/?symbol=XAUUSD&interval=60",
-    "EURUSD": "https://www.tradingview.com/chart/" + TV_CHART_ID + "/?symbol=EURUSD&interval=60",
-    "GBPUSD": "https://www.tradingview.com/chart/" + TV_CHART_ID + "/?symbol=GBPUSD&interval=60",
-    "USDJPY": "https://www.tradingview.com/chart/" + TV_CHART_ID + "/?symbol=USDJPY&interval=60",
+    "XAUUSD": "https://www.tradingview.com/chart/tSivPh6K/",
+    "EURUSD": "https://www.tradingview.com/chart/uVaeDcEL/",
+    "GBPUSD": "https://www.tradingview.com/chart/imDxNYnU/",
+    "USDJPY": "https://www.tradingview.com/chart/b816agG0/",
 }
 
 INSTRUMENTS = {
@@ -190,10 +188,10 @@ def analyse_chart(screenshot_path, instrument):
         "TRADE: [YES / NO]\n"
         "DIRECTION: [LONG / SHORT / NONE]\n"
         "INSTRUMENT: [" + instrument + "]\n"
-        "ENTRY: [specific price level]\n"
-        "STOP_LOSS: [specific price level]\n"
-        "TAKE_PROFIT_1: [specific price level]\n"
-        "TAKE_PROFIT_2: [specific price level]\n"
+        "ENTRY: [specific current price level - never use 0 or N/A]\n"
+        "STOP_LOSS: [specific price level - never use 0 or N/A]\n"
+        "TAKE_PROFIT_1: [specific price level - never use 0 or N/A]\n"
+        "TAKE_PROFIT_2: [specific price level - never use 0 or N/A]\n"
         "CONFIDENCE: [0-100]\n"
         "REASON: [two sentences maximum]\n\n"
         "Only recommend TRADE: YES if ALL of these are true:\n"
@@ -201,7 +199,8 @@ def analyse_chart(screenshot_path, instrument):
         "- Confidence is 70 or above\n"
         "- Risk reward is minimum 2:1\n"
         "- There is a clear directional bias\n"
-        "- A liquidity grab has occurred and price has reversed"
+        "- A liquidity grab has occurred and price has reversed\n\n"
+        "IMPORTANT: Always provide real price levels for ENTRY, STOP_LOSS, TAKE_PROFIT_1 and TAKE_PROFIT_2 based on what you see on the chart. Never use 0 or N/A."
     )
 
     message = client.messages.create(
@@ -277,7 +276,7 @@ def calculate_units(instrument, entry, stop_loss, balance):
         max_u = inst.get("max", 5000)
         units = max(min_u, min(units, max_u))
 
-        print("Units: " + str(units) + " | Risk: AUD " + str(round(risk_amount, 2)) + " | Stop distance: " + str(round(stop_distance, 5)))
+        print("Units: " + str(units) + " | Risk: AUD " + str(round(risk_amount, 2)) + " | Stop: " + str(round(stop_distance, 5)))
         return units
 
     except Exception as e:
@@ -306,7 +305,7 @@ def place_trade(analysis):
             print("Direction is NONE - no trade")
             return False
 
-        if entry == "0" or stop_loss == "0" or tp1 == "0":
+        if entry in ["0", "N/A", ""] or stop_loss in ["0", "N/A", ""] or tp1 in ["0", "N/A", ""]:
             print("Invalid price levels - no trade")
             return False
 
@@ -326,14 +325,15 @@ def place_trade(analysis):
         if direction == "SHORT":
             units = -units
 
-        sl_formatted  = format_price(stop_loss, instrument)
-        tp_formatted  = format_price(tp1, instrument)
+        sl_formatted = format_price(stop_loss, instrument)
+        tp_formatted = format_price(tp1, instrument)
 
         print("Placing trade:")
-        print("  Symbol: " + oanda_symbol)
-        print("  Units: " + str(units))
-        print("  SL: " + sl_formatted)
-        print("  TP: " + tp_formatted)
+        print("  Symbol:  " + oanda_symbol)
+        print("  Units:   " + str(units))
+        print("  Entry:   " + entry)
+        print("  SL:      " + sl_formatted)
+        print("  TP:      " + tp_formatted)
 
         order_data = {
             "order": {

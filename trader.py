@@ -3,7 +3,6 @@ import asyncio
 import anthropic
 import base64
 import pytz
-import json
 from datetime import datetime
 from dotenv import load_dotenv
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -23,10 +22,16 @@ OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
 OANDA_ENV        = os.getenv("OANDA_ENVIRONMENT", "practice")
 TV_USERNAME      = os.getenv("TV_USERNAME")
 TV_PASSWORD      = os.getenv("TV_PASSWORD")
-TV_CHART_URL     = os.getenv("TV_CHART_URL")
 TV_SESSION       = os.getenv("TV_SESSION")
 
-client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+TV_CHART_ID = "tSivPh6K"
+
+CHART_URLS = {
+    "XAUUSD": "https://www.tradingview.com/chart/" + TV_CHART_ID + "/?symbol=XAUUSD&interval=60",
+    "EURUSD": "https://www.tradingview.com/chart/" + TV_CHART_ID + "/?symbol=EURUSD&interval=60",
+    "GBPUSD": "https://www.tradingview.com/chart/" + TV_CHART_ID + "/?symbol=GBPUSD&interval=60",
+    "USDJPY": "https://www.tradingview.com/chart/" + TV_CHART_ID + "/?symbol=USDJPY&interval=60",
+}
 
 INSTRUMENTS = {
     "XAUUSD": {"oanda": "XAU_USD", "min": 1,   "max": 10},
@@ -34,6 +39,8 @@ INSTRUMENTS = {
     "GBPUSD": {"oanda": "GBP_USD", "min": 100,  "max": 100000},
     "USDJPY": {"oanda": "USD_JPY", "min": 100,  "max": 100000},
 }
+
+client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
 
 def save_session_from_env():
@@ -63,8 +70,15 @@ async def take_screenshot(instrument="XAUUSD"):
     print("Taking screenshot of " + instrument + "...")
     screenshot_path = "chart_" + instrument + ".png"
 
+    if os.path.exists(screenshot_path):
+        os.remove(screenshot_path)
+        print("Cleared old screenshot")
+
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox"]
+        )
 
         if os.path.exists("tv_session.json"):
             context = await browser.new_context(
@@ -79,7 +93,7 @@ async def take_screenshot(instrument="XAUUSD"):
         page = await context.new_page()
 
         if not os.path.exists("tv_session.json"):
-            print("No session found - attempting login...")
+            print("No session - attempting login...")
             try:
                 await page.goto("https://www.tradingview.com/", wait_until="domcontentloaded")
                 await page.wait_for_timeout(5000)
@@ -111,52 +125,64 @@ async def take_screenshot(instrument="XAUUSD"):
                 await browser.close()
                 return None
 
-        print("Loading chart...")
-        await page.goto(TV_CHART_URL, wait_until="domcontentloaded")
-        await page.wait_for_timeout(10000)
+        chart_url = CHART_URLS.get(instrument, CHART_URLS["XAUUSD"])
+        print("Loading: " + chart_url)
+
+        await page.goto(chart_url, wait_until="domcontentloaded")
+        await page.wait_for_timeout(5000)
+
+        try:
+            await page.wait_for_selector('.chart-container', timeout=15000)
+            print("Chart container loaded!")
+        except:
+            print("Chart container timeout - continuing anyway")
+
+        await page.wait_for_timeout(8000)
 
         try:
             await page.evaluate("""
                 var sidebar = document.querySelector('.layout__area--left');
                 if (sidebar) sidebar.remove();
-                var toolbar = document.querySelector('.top-toolbar');
-                if (toolbar) toolbar.style.display = 'none';
+                var header = document.querySelector('.header-chart-panel');
+                if (header) header.style.display = 'none';
             """)
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(1000)
         except:
             pass
 
         await page.screenshot(path=screenshot_path, full_page=False)
         await browser.close()
 
-    print("Screenshot saved!")
+    print("Screenshot saved: " + screenshot_path)
     return screenshot_path
 
 
 def analyse_chart(screenshot_path, instrument):
-    print("Sending chart to Claude for analysis...")
+    print("Sending " + instrument + " chart to Claude...")
 
     with open(screenshot_path, "rb") as f:
         image_data = base64.standard_b64encode(f.read()).decode("utf-8")
 
     prompt = (
         "You are the world's best institutional forex and gold trader at a top hedge fund.\n\n"
-        "You are looking at a " + instrument + " 1 hour chart.\n\n"
-        "Analyse this chart using this A+ setup framework:\n\n"
+        "You are looking at a " + instrument + " 1 hour chart with the HF Edge indicator.\n\n"
+        "Analyse this chart using the A+ setup framework:\n\n"
         "STEP 1 - TREND BIAS:\n"
         "- Is the overall trend bullish or bearish?\n"
-        "- Where is price relative to the EMAs?\n\n"
+        "- Where is price relative to the EMAs (blue=21, orange=50, red=200)?\n\n"
         "STEP 2 - MARKET STRUCTURE:\n"
         "- What is the current 1H structure?\n"
+        "- Is price making higher highs and higher lows (bullish) or lower highs and lower lows (bearish)?\n"
         "- Is price trending or consolidating?\n\n"
         "STEP 3 - KEY LEVELS:\n"
-        "- Identify nearest major support and resistance\n"
-        "- Has there been a liquidity grab?\n"
-        "- Has price broken structure in a new direction?\n\n"
+        "- Identify nearest major support and resistance levels\n"
+        "- Are there any visible liquidity pools (equal highs or equal lows)?\n"
+        "- Has there been a recent liquidity grab (stop hunt below support or above resistance)?\n\n"
         "STEP 4 - SETUP QUALITY:\n"
-        "- Is there an A+ setup?\n"
-        "- Liquidity grab + reversal + break of structure + correction\n"
-        "- Is there a clear entry after a correction?\n\n"
+        "- Has price made a liquidity grab and reversed?\n"
+        "- Has price broken structure in the new direction (indication)?\n"
+        "- Has there been a correction after the indication?\n"
+        "- Is there a clean entry point now?\n\n"
         "STEP 5 - DECISION:\n"
         "Respond with EXACTLY this format and nothing else:\n\n"
         "BIAS: [BULLISH / BEARISH / NEUTRAL]\n"
@@ -164,18 +190,18 @@ def analyse_chart(screenshot_path, instrument):
         "TRADE: [YES / NO]\n"
         "DIRECTION: [LONG / SHORT / NONE]\n"
         "INSTRUMENT: [" + instrument + "]\n"
-        "ENTRY: [price level]\n"
-        "STOP_LOSS: [price level]\n"
-        "TAKE_PROFIT_1: [price level]\n"
-        "TAKE_PROFIT_2: [price level]\n"
+        "ENTRY: [specific price level]\n"
+        "STOP_LOSS: [specific price level]\n"
+        "TAKE_PROFIT_1: [specific price level]\n"
+        "TAKE_PROFIT_2: [specific price level]\n"
         "CONFIDENCE: [0-100]\n"
         "REASON: [two sentences maximum]\n\n"
-        "Only recommend YES if:\n"
-        "- Setup is A+ or A\n"
-        "- Confidence above 70\n"
-        "- Risk reward minimum 2:1\n"
-        "- Clear directional bias\n"
-        "- Liquidity grab has occurred"
+        "Only recommend TRADE: YES if ALL of these are true:\n"
+        "- Setup quality is A+ or A\n"
+        "- Confidence is 70 or above\n"
+        "- Risk reward is minimum 2:1\n"
+        "- There is a clear directional bias\n"
+        "- A liquidity grab has occurred and price has reversed"
     )
 
     message = client.messages.create(
@@ -203,7 +229,7 @@ def analyse_chart(screenshot_path, instrument):
     )
 
     response = message.content[0].text
-    print("Analysis received:")
+    print("Analysis:")
     print(response)
     return response
 
@@ -349,7 +375,7 @@ async def send_report(analysis, trade_placed, screenshot_path):
                 await bot.send_photo(
                     chat_id=CHAT_ID,
                     photo=photo,
-                    caption="Chart at time of analysis"
+                    caption=instrument + " chart at time of analysis"
                 )
 
         print("Telegram report sent!")
@@ -408,6 +434,7 @@ if __name__ == "__main__":
     print("Instruments: XAUUSD EURUSD GBPUSD USDJPY")
     print("Sessions: London + New York (AEST)")
     print("Risk: 2% per trade")
+    print("Scanning every 30 minutes")
     print("="*40)
 
     run_analysis()

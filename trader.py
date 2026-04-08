@@ -34,10 +34,10 @@ CHART_URLS = {
 }
 
 INSTRUMENTS = {
-    "XAUUSD": {"oanda": "XAU_USD", "min": 1,   "max": 10},
-    "EURUSD": {"oanda": "EUR_USD", "min": 100,  "max": 100000},
-    "GBPUSD": {"oanda": "GBP_USD", "min": 100,  "max": 100000},
-    "USDJPY": {"oanda": "USD_JPY", "min": 100,  "max": 100000},
+    "XAUUSD": {"oanda": "XAU_USD", "min": 1,   "max": 10,   "decimals": 2},
+    "EURUSD": {"oanda": "EUR_USD", "min": 100,  "max": 5000, "decimals": 5},
+    "GBPUSD": {"oanda": "GBP_USD", "min": 100,  "max": 5000, "decimals": 5},
+    "USDJPY": {"oanda": "USD_JPY", "min": 100,  "max": 5000, "decimals": 3},
 }
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
@@ -261,25 +261,37 @@ def calculate_units(instrument, entry, stop_loss, balance):
         stop_distance = abs(float(entry) - float(stop_loss))
 
         if stop_distance == 0:
+            print("Stop distance is zero - skipping")
             return None
 
-        inst  = INSTRUMENTS.get(instrument, {})
+        inst = INSTRUMENTS.get(instrument, {})
 
         if instrument == "XAUUSD":
             units = int(risk_amount / stop_distance)
+        elif instrument == "USDJPY":
+            units = int((risk_amount / stop_distance) * 100)
         else:
             units = int((risk_amount / stop_distance) * 10000)
 
         min_u = inst.get("min", 1)
-        max_u = inst.get("max", 10)
+        max_u = inst.get("max", 5000)
         units = max(min_u, min(units, max_u))
 
-        print("Units: " + str(units) + " | Risk: AUD " + str(round(risk_amount, 2)))
+        print("Units: " + str(units) + " | Risk: AUD " + str(round(risk_amount, 2)) + " | Stop distance: " + str(round(stop_distance, 5)))
         return units
 
     except Exception as e:
         print("Units error: " + str(e))
         return None
+
+
+def format_price(price, instrument):
+    inst     = INSTRUMENTS.get(instrument, {})
+    decimals = inst.get("decimals", 5)
+    try:
+        return str(round(float(price), decimals))
+    except:
+        return price
 
 
 def place_trade(analysis):
@@ -291,6 +303,11 @@ def place_trade(analysis):
         tp1        = analysis.get("TAKE_PROFIT_1", "0").strip().replace(",", "")
 
         if direction == "NONE":
+            print("Direction is NONE - no trade")
+            return False
+
+        if entry == "0" or stop_loss == "0" or tp1 == "0":
+            print("Invalid price levels - no trade")
             return False
 
         inst_config  = INSTRUMENTS.get(instrument, {})
@@ -298,14 +315,25 @@ def place_trade(analysis):
 
         balance = get_balance()
         if not balance:
+            print("Could not get balance")
             return False
 
         units = calculate_units(instrument, entry, stop_loss, balance)
         if not units:
+            print("Could not calculate units")
             return False
 
         if direction == "SHORT":
             units = -units
+
+        sl_formatted  = format_price(stop_loss, instrument)
+        tp_formatted  = format_price(tp1, instrument)
+
+        print("Placing trade:")
+        print("  Symbol: " + oanda_symbol)
+        print("  Units: " + str(units))
+        print("  SL: " + sl_formatted)
+        print("  TP: " + tp_formatted)
 
         order_data = {
             "order": {
@@ -315,11 +343,11 @@ def place_trade(analysis):
                 "timeInForce": "IOC",
                 "positionFill": "DEFAULT",
                 "stopLossOnFill": {
-                    "price": str(round(float(stop_loss), 5)),
+                    "price": sl_formatted,
                     "timeInForce": "GTC"
                 },
                 "takeProfitOnFill": {
-                    "price": str(round(float(tp1), 5)),
+                    "price": tp_formatted,
                     "timeInForce": "GTC"
                 }
             }
@@ -328,7 +356,7 @@ def place_trade(analysis):
         oanda = oandapyV20.API(access_token=OANDA_API_KEY, environment=OANDA_ENV)
         r = orders.OrderCreate(OANDA_ACCOUNT_ID, data=order_data)
         oanda.request(r)
-        print("Trade placed: " + direction + " " + str(units) + " " + oanda_symbol)
+        print("Trade placed successfully!")
         return True
 
     except Exception as e:

@@ -3,6 +3,7 @@ import asyncio
 import anthropic
 import base64
 import pytz
+import json
 from datetime import datetime
 from dotenv import load_dotenv
 from apscheduler.schedulers.blocking import BlockingScheduler
@@ -23,6 +24,7 @@ OANDA_ENV        = os.getenv("OANDA_ENVIRONMENT", "practice")
 TV_USERNAME      = os.getenv("TV_USERNAME")
 TV_PASSWORD      = os.getenv("TV_PASSWORD")
 TV_CHART_URL     = os.getenv("TV_CHART_URL")
+TV_SESSION       = os.getenv("TV_SESSION")
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
@@ -34,51 +36,27 @@ INSTRUMENTS = {
 }
 
 
+def save_session_from_env():
+    if TV_SESSION and not os.path.exists("tv_session.json"):
+        try:
+            with open("tv_session.json", "w") as f:
+                f.write(TV_SESSION)
+            print("Session loaded from environment!")
+        except Exception as e:
+            print("Session load error: " + str(e))
+
+
 def is_trading_session():
     aest = pytz.timezone("Australia/Sydney")
     now  = datetime.now(aest)
     hour = now.hour
-    london   = 15 <= hour < 24
-    newyork  = 0  <= hour < 2
+    london  = 15 <= hour < 24
+    newyork = 0  <= hour < 2
     if london or newyork:
         print("Active session: " + ("London" if london else "New York"))
         return True
     print("Outside trading session - skipping")
     return False
-
-
-async def login_tradingview(page, context):
-    print("Logging into TradingView...")
-    try:
-        await page.goto("https://www.tradingview.com/", wait_until="domcontentloaded")
-        await page.wait_for_timeout(5000)
-
-        sign_in = page.locator('button:has-text("Sign in")')
-        if await sign_in.count() > 0:
-            await sign_in.first.click()
-            await page.wait_for_timeout(3000)
-
-        email_btn = page.locator('span:has-text("Email")')
-        if await email_btn.count() > 0:
-            await email_btn.first.click()
-            await page.wait_for_timeout(2000)
-
-        await page.wait_for_selector('input[name="username"]', timeout=15000)
-        await page.fill('input[name="username"]', TV_USERNAME)
-        await page.fill('input[name="password"]', TV_PASSWORD)
-        await page.wait_for_timeout(1000)
-
-        submit = page.locator('button[type="submit"]')
-        await submit.first.click()
-        await page.wait_for_timeout(8000)
-
-        await context.storage_state(path="tv_session.json")
-        print("Login successful!")
-        return True
-
-    except Exception as e:
-        print("Login error: " + str(e))
-        return False
 
 
 async def take_screenshot(instrument="XAUUSD"):
@@ -101,8 +79,35 @@ async def take_screenshot(instrument="XAUUSD"):
         page = await context.new_page()
 
         if not os.path.exists("tv_session.json"):
-            success = await login_tradingview(page, context)
-            if not success:
+            print("No session found - attempting login...")
+            try:
+                await page.goto("https://www.tradingview.com/", wait_until="domcontentloaded")
+                await page.wait_for_timeout(5000)
+
+                sign_in = page.locator('button:has-text("Sign in")')
+                if await sign_in.count() > 0:
+                    await sign_in.first.click()
+                    await page.wait_for_timeout(3000)
+
+                email_btn = page.locator('span:has-text("Email")')
+                if await email_btn.count() > 0:
+                    await email_btn.first.click()
+                    await page.wait_for_timeout(2000)
+
+                await page.wait_for_selector('input[name="username"]', timeout=15000)
+                await page.fill('input[name="username"]', TV_USERNAME)
+                await page.fill('input[name="password"]', TV_PASSWORD)
+                await page.wait_for_timeout(1000)
+
+                submit = page.locator('button[type="submit"]')
+                await submit.first.click()
+                await page.wait_for_timeout(8000)
+
+                await context.storage_state(path="tv_session.json")
+                print("Login successful!")
+
+            except Exception as e:
+                print("Login error: " + str(e))
                 await browser.close()
                 return None
 
@@ -139,17 +144,18 @@ def analyse_chart(screenshot_path, instrument):
         "You are looking at a " + instrument + " 1 hour chart.\n\n"
         "Analyse this chart using this A+ setup framework:\n\n"
         "STEP 1 - TREND BIAS:\n"
-        "- Is the overall trend bullish (higher highs, higher lows) or bearish (lower highs, lower lows)?\n"
+        "- Is the overall trend bullish or bearish?\n"
         "- Where is price relative to the EMAs?\n\n"
         "STEP 2 - MARKET STRUCTURE:\n"
         "- What is the current 1H structure?\n"
         "- Is price trending or consolidating?\n\n"
         "STEP 3 - KEY LEVELS:\n"
         "- Identify nearest major support and resistance\n"
-        "- Has there been a liquidity grab (stop hunt)?\n"
+        "- Has there been a liquidity grab?\n"
         "- Has price broken structure in a new direction?\n\n"
         "STEP 4 - SETUP QUALITY:\n"
-        "- Is there an A+ setup? (liquidity grab + reversal + break of structure + correction)\n"
+        "- Is there an A+ setup?\n"
+        "- Liquidity grab + reversal + break of structure + correction\n"
         "- Is there a clear entry after a correction?\n\n"
         "STEP 5 - DECISION:\n"
         "Respond with EXACTLY this format and nothing else:\n\n"
@@ -231,7 +237,7 @@ def calculate_units(instrument, entry, stop_loss, balance):
         if stop_distance == 0:
             return None
 
-        inst = INSTRUMENTS.get(instrument, {})
+        inst  = INSTRUMENTS.get(instrument, {})
 
         if instrument == "XAUUSD":
             units = int(risk_amount / stop_distance)
@@ -357,6 +363,8 @@ def run_analysis():
     print("Run: " + datetime.now().strftime("%H:%M:%S"))
     print("="*40)
 
+    save_session_from_env()
+
     if not is_trading_session():
         return
 
@@ -373,8 +381,8 @@ def run_analysis():
             response = analyse_chart(screenshot_path, instrument)
             analysis = parse_analysis(response)
 
-            quality    = analysis.get("SETUP_QUALITY", "C")
-            trade_ok   = analysis.get("TRADE", "NO").strip() == "YES"
+            quality  = analysis.get("SETUP_QUALITY", "C")
+            trade_ok = analysis.get("TRADE", "NO").strip() == "YES"
 
             try:
                 confidence = int(analysis.get("CONFIDENCE", "0").replace("%", "").strip())

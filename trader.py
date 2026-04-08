@@ -133,9 +133,9 @@ async def take_screenshot(instrument="XAUUSD"):
 
         try:
             await page.wait_for_selector('.chart-container', timeout=15000)
-            print("Chart container loaded!")
+            print("Chart loaded!")
         except:
-            print("Chart container timeout - continuing anyway")
+            print("Chart timeout - continuing anyway")
 
         await page.wait_for_timeout(8000)
 
@@ -180,7 +180,7 @@ def analyse_chart(screenshot_path, instrument):
         "- Has there been a recent liquidity grab (stop hunt below support or above resistance)?\n\n"
         "STEP 4 - SETUP QUALITY:\n"
         "- Has price made a liquidity grab and reversed?\n"
-        "- Has price broken structure in the new direction (indication)?\n"
+        "- Has price broken structure in the new direction?\n"
         "- Has there been a correction after the indication?\n"
         "- Is there a clean entry point now?\n\n"
         "STEP 5 - DECISION:\n"
@@ -312,13 +312,15 @@ def place_trade(analysis):
                 "type": "MARKET",
                 "instrument": oanda_symbol,
                 "units": str(units),
-                "timeInForce": "FOK",
+                "timeInForce": "IOC",
                 "positionFill": "DEFAULT",
                 "stopLossOnFill": {
-                    "price": str(round(float(stop_loss), 5))
+                    "price": str(round(float(stop_loss), 5)),
+                    "timeInForce": "GTC"
                 },
                 "takeProfitOnFill": {
-                    "price": str(round(float(tp1), 5))
+                    "price": str(round(float(tp1), 5)),
+                    "timeInForce": "GTC"
                 }
             }
         }

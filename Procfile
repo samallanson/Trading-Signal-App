@@ -1,1 +1,1 @@
-worker: python trader.py
+worker: bash start.sh

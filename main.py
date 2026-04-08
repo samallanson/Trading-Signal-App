@@ -7,6 +7,10 @@ from dotenv import load_dotenv
 from apscheduler.schedulers.blocking import BlockingScheduler
 import telegram
 import yfinance as yf
+import oandapyV20
+import oandapyV20.endpoints.orders as orders
+import oandapyV20.endpoints.accounts as accounts
+from oandapyV20 import API as OandaAPI
 
 load_dotenv()
 
@@ -14,9 +18,62 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 ANTHROPIC_KEY = os.getenv("ANTHROPIC_API_KEY")
+OANDA_API_KEY = os.getenv("OANDA_API_KEY")
+OANDA_ACCOUNT_ID = os.getenv("OANDA_ACCOUNT_ID")
+OANDA_ENVIRONMENT = os.getenv("OANDA_ENVIRONMENT", "practice")
 
 seen_articles = set()
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
+
+
+def get_account_balance():
+    try:
+        oanda = OandaAPI(access_token=OANDA_API_KEY, environment=OANDA_ENVIRONMENT)
+        r = accounts.AccountSummary(OANDA_ACCOUNT_ID)
+        oanda.request(r)
+        balance = float(r.response["account"]["balance"])
+        print("  Account balance: AUD " + str(balance))
+        return balance
+    except Exception as e:
+        print("  Balance error: " + str(e))
+        return None
+
+
+def calculate_position_size(balance, stop_loss_str, entry_str, instrument):
+    try:
+        risk_amount = balance * 0.02
+
+        entry = float(entry_str.split("-")[0].strip().replace("$", "").replace(",", ""))
+        stop = float(stop_loss_str.strip().replace("$", "").replace(",", ""))
+        stop_distance = abs(entry - stop)
+
+        if stop_distance == 0:
+            print("  Stop distance is zero, using default size")
+            return "1"
+
+        if instrument in ["XAU_USD"]:
+            pip_value = 1.0
+            units = round((risk_amount / stop_distance) * pip_value, 0)
+            units = max(1, min(int(units), 10))
+
+        elif instrument in ["BCO_USD"]:
+            pip_value = 1.0
+            units = round((risk_amount / stop_distance) * pip_value, 0)
+            units = max(1, min(int(units), 50))
+
+        else:
+            pip_value = 0.0001
+            units = round(risk_amount / (stop_distance / pip_value) * 10000, 0)
+            units = max(100, min(int(units), 100000))
+
+        print("  Risk amount: AUD " + str(round(risk_amount, 2)))
+        print("  Stop distance: " + str(round(stop_distance, 5)))
+        print("  Position size: " + str(units) + " units")
+        return str(units)
+
+    except Exception as e:
+        print("  Position size error: " + str(e))
+        return "1"
 
 
 def get_live_prices():
@@ -39,6 +96,58 @@ def get_live_prices():
     except Exception as e:
         print("Error fetching live prices: " + str(e))
         return {}
+
+
+def place_oanda_trade(signal):
+    try:
+        oanda = OandaAPI(access_token=OANDA_API_KEY, environment=OANDA_ENVIRONMENT)
+        direction = signal.get("DIRECTION", "NONE").strip()
+        assets = signal.get("ASSETS", "").strip()
+        entry = signal.get("ENTRY_ZONE", "0").strip()
+        stop = signal.get("STOP", "0").strip()
+
+        if "XAU" in assets or "gold" in assets.lower():
+            instrument = "XAU_USD"
+        elif "WTI" in assets or "oil" in assets.lower():
+            instrument = "BCO_USD"
+        elif "EUR" in assets:
+            instrument = "EUR_USD"
+        elif "GBP" in assets:
+            instrument = "GBP_USD"
+        elif "JPY" in assets:
+            instrument = "USD_JPY"
+        else:
+            print("  No matching instrument for: " + assets)
+            return False
+
+        balance = get_account_balance()
+        if balance is None:
+            print("  Could not get balance, using default size")
+            units = "1"
+        else:
+            units = calculate_position_size(balance, stop, entry, instrument)
+
+        if direction == "SHORT":
+            units = "-" + units
+
+        order_data = {
+            "order": {
+                "type": "MARKET",
+                "instrument": instrument,
+                "units": units,
+                "timeInForce": "FOK",
+                "positionFill": "DEFAULT"
+            }
+        }
+
+        r = orders.OrderCreate(OANDA_ACCOUNT_ID, data=order_data)
+        oanda.request(r)
+        print("  Trade placed: " + direction + " " + units + " units of " + instrument)
+        return True
+
+    except Exception as e:
+        print("  Oanda error: " + str(e))
+        return False
 
 
 def fetch_news():
@@ -80,6 +189,8 @@ def classify_article(article):
         "- Focus only on Forex and Commodities such as Gold Oil and USD pairs\n"
         "- IGNORE any articles about stocks crypto politics religion sports or entertainment\n"
         "- If the article is not directly about Forex or Commodities set URGENCY to LOW\n"
+        "- Always provide a specific numeric STOP price based on current live prices\n"
+        "- Always provide a specific numeric ENTRY_ZONE price based on current live prices\n"
     )
     message = client.messages.create(
         model="claude-opus-4-5",
@@ -146,7 +257,11 @@ def run_scanner():
                 message = format_signal(signal, article)
                 print("  Sending to Telegram...")
                 asyncio.run(send_telegram(message))
-                print("  Sent!")
+                print("  Signal sent!")
+                print("  Placing trade on Oanda...")
+                trade_placed = place_oanda_trade(signal)
+                if trade_placed:
+                    asyncio.run(send_telegram("✅ Trade automatically placed on Oanda with 2% risk management!"))
             else:
                 print("  Skipped.")
         except Exception as e:
@@ -157,6 +272,8 @@ def run_scanner():
 if __name__ == "__main__":
     print("Trading Signal App Starting...")
     print("Monitoring: Gold, Oil, Forex")
+    print("Auto Trading: Oanda (" + OANDA_ENVIRONMENT + ")")
+    print("Risk Management: 2% per trade")
     print("Scanning every 5 minutes")
     print("-" * 40)
     run_scanner()

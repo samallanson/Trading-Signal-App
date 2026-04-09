@@ -158,6 +158,22 @@ async def take_screenshot(instrument="XAUUSD"):
     return screenshot_path
 
 
+def get_current_price(instrument):
+    try:
+        import oandapyV20.endpoints.pricing as pricing
+        oanda  = oandapyV20.API(access_token=OANDA_API_KEY, environment=OANDA_ENV)
+        inst   = INSTRUMENTS.get(instrument, {})
+        symbol = inst.get("oanda", "XAU_USD")
+        r      = pricing.PricingInfo(OANDA_ACCOUNT_ID, params={"instruments": symbol})
+        oanda.request(r)
+        price  = float(r.response["prices"][0]["closeoutAsk"])
+        print("Current " + instrument + " price: " + str(price))
+        return price
+    except Exception as e:
+        print("Price fetch error: " + str(e))
+        return None
+
+
 def analyse_chart(screenshot_path, instrument):
     print("Sending " + instrument + " chart to Claude...")
 
@@ -196,7 +212,6 @@ def analyse_chart(screenshot_path, instrument):
         "TRADE: [YES / NO]\n"
         "DIRECTION: [LONG / SHORT / NONE]\n"
         "INSTRUMENT: [" + instrument + "]\n"
-        "ENTRY: [specific current price level]\n"
         "STOP_LOSS: [specific price level]\n"
         "TAKE_PROFIT_1: [specific price level]\n"
         "TAKE_PROFIT_2: [specific price level]\n"
@@ -207,10 +222,11 @@ def analyse_chart(screenshot_path, instrument):
         "- If ANY of the 7 A+ criteria are missing set SETUP_QUALITY to A or lower\n"
         "- Never trade consolidation or ranging markets\n"
         "- Always provide real price levels based on what you see - never use 0 or N/A\n"
-        "- For XAUUSD stop loss must be at least 3 dollars away from entry\n"
-        "- For USDJPY stop loss must be at least 0.10 away from entry\n"
-        "- For EURUSD and GBPUSD stop loss must be at least 0.0010 away from entry\n"
-        "- Risk reward must be minimum 2.5:1 or do not trade"
+        "- For XAUUSD stop loss must be at least 3 dollars away from current price\n"
+        "- For USDJPY stop loss must be at least 0.10 away from current price\n"
+        "- For EURUSD and GBPUSD stop loss must be at least 0.0010 away from current price\n"
+        "- Risk reward must be minimum 2.5:1 or do not trade\n"
+        "- DO NOT include ENTRY in your response - the trade will execute at current market price"
     )
 
     message = client.messages.create(
@@ -264,11 +280,11 @@ def get_balance():
         return None
 
 
-def validate_stop_distance(instrument, entry, stop_loss):
+def validate_stop_distance(instrument, current_price, stop_loss):
     try:
-        inst         = INSTRUMENTS.get(instrument, {})
-        min_stop     = inst.get("min_stop", 0)
-        stop_distance = abs(float(entry) - float(stop_loss))
+        inst          = INSTRUMENTS.get(instrument, {})
+        min_stop      = inst.get("min_stop", 0)
+        stop_distance = abs(float(current_price) - float(stop_loss))
 
         if stop_distance < min_stop:
             print("Stop too close: " + str(round(stop_distance, 5)) + " minimum: " + str(min_stop))
@@ -282,10 +298,10 @@ def validate_stop_distance(instrument, entry, stop_loss):
         return False
 
 
-def calculate_units(instrument, entry, stop_loss, balance):
+def calculate_units(instrument, current_price, stop_loss, balance):
     try:
         risk_amount   = balance * 0.02
-        stop_distance = abs(float(entry) - float(stop_loss))
+        stop_distance = abs(float(current_price) - float(stop_loss))
 
         if stop_distance == 0:
             print("Stop distance is zero - skipping")
@@ -325,7 +341,6 @@ def place_trade(analysis):
     try:
         direction  = analysis.get("DIRECTION", "NONE").strip()
         instrument = analysis.get("INSTRUMENT", "XAUUSD").strip()
-        entry      = analysis.get("ENTRY", "0").strip().replace(",", "")
         stop_loss  = analysis.get("STOP_LOSS", "0").strip().replace(",", "")
         tp1        = analysis.get("TAKE_PROFIT_1", "0").strip().replace(",", "")
 
@@ -333,12 +348,17 @@ def place_trade(analysis):
             print("Direction is NONE - no trade")
             return False
 
-        if entry in ["0", "N/A", ""] or stop_loss in ["0", "N/A", ""] or tp1 in ["0", "N/A", ""]:
+        if stop_loss in ["0", "N/A", ""] or tp1 in ["0", "N/A", ""]:
             print("Invalid price levels - no trade")
             return False
 
-        if not validate_stop_distance(instrument, entry, stop_loss):
-            print("Stop distance too small for " + instrument + " - no trade")
+        current_price = get_current_price(instrument)
+        if not current_price:
+            print("Could not get current price")
+            return False
+
+        if not validate_stop_distance(instrument, current_price, stop_loss):
+            print("Stop distance too small - no trade")
             return False
 
         inst_config  = INSTRUMENTS.get(instrument, {})
@@ -349,7 +369,7 @@ def place_trade(analysis):
             print("Could not get balance")
             return False
 
-        units = calculate_units(instrument, entry, stop_loss, balance)
+        units = calculate_units(instrument, current_price, stop_loss, balance)
         if not units:
             print("Could not calculate units")
             return False
@@ -360,19 +380,19 @@ def place_trade(analysis):
         sl_formatted = format_price(stop_loss, instrument)
         tp_formatted = format_price(tp1, instrument)
 
-        print("Placing trade:")
-        print("  Symbol:  " + oanda_symbol)
-        print("  Units:   " + str(units))
-        print("  Entry:   " + entry)
-        print("  SL:      " + sl_formatted)
-        print("  TP:      " + tp_formatted)
+        print("Placing market order:")
+        print("  Symbol:        " + oanda_symbol)
+        print("  Units:         " + str(units))
+        print("  Current price: " + str(current_price))
+        print("  SL:            " + sl_formatted)
+        print("  TP:            " + tp_formatted)
 
         order_data = {
             "order": {
                 "type": "MARKET",
                 "instrument": oanda_symbol,
                 "units": str(units),
-                "timeInForce": "IOC",
+                "timeInForce": "GTC",
                 "positionFill": "DEFAULT",
                 "stopLossOnFill": {
                     "price": sl_formatted,
@@ -388,7 +408,7 @@ def place_trade(analysis):
         oanda = oandapyV20.API(access_token=OANDA_API_KEY, environment=OANDA_ENV)
         r = orders.OrderCreate(OANDA_ACCOUNT_ID, data=order_data)
         oanda.request(r)
-        print("Trade placed successfully!")
+        print("Trade placed successfully at market price!")
         return True
 
     except Exception as e:
@@ -396,7 +416,7 @@ def place_trade(analysis):
         return False
 
 
-async def send_report(analysis, trade_placed, screenshot_path):
+async def send_report(analysis, trade_placed, screenshot_path, current_price=None):
     try:
         bot = telegram.Bot(token=TELEGRAM_TOKEN)
 
@@ -411,10 +431,10 @@ async def send_report(analysis, trade_placed, screenshot_path):
             msg  = "TRADE PLACED\n\n"
             msg += "Instrument: " + instrument + "\n"
             msg += "Direction: " + direction + "\n"
+            msg += "Entry: Market price " + (str(current_price) if current_price else "N/A") + "\n"
             msg += "Setup: " + quality + "\n"
             msg += "Confidence: " + confidence + "%\n"
             msg += "Bias: " + bias + "\n"
-            msg += "Entry: " + analysis.get("ENTRY", "N/A") + "\n"
             msg += "Stop Loss: " + analysis.get("STOP_LOSS", "N/A") + "\n"
             msg += "TP1: " + analysis.get("TAKE_PROFIT_1", "N/A") + "\n"
             msg += "TP2: " + analysis.get("TAKE_PROFIT_2", "N/A") + "\n\n"
@@ -479,14 +499,17 @@ def run_analysis():
 
             print("Setup: " + quality + " | Confidence: " + str(confidence) + "% | Trade: " + str(trade_ok))
 
-            trade_placed = False
+            trade_placed  = False
+            current_price = None
+
             if trade_ok and quality in VALID_SETUPS and confidence >= CONFIDENCE_THRESHOLD:
                 print("A+ setup confirmed - placing trade!")
-                trade_placed = place_trade(analysis)
+                current_price = get_current_price(instrument)
+                trade_placed  = place_trade(analysis)
             else:
                 print("Skipped - requires A+ setup with 80%+ confidence")
 
-            asyncio.run(send_report(analysis, trade_placed, screenshot_path))
+            asyncio.run(send_report(analysis, trade_placed, screenshot_path, current_price))
 
         except Exception as e:
             print("Error on " + instrument + ": " + str(e))
@@ -500,6 +523,7 @@ if __name__ == "__main__":
     print("Risk: 2% per trade")
     print("Min confidence: 80%")
     print("Setup required: A+ only")
+    print("Execution: Market price (instant fill)")
     print("Scanning every 30 minutes")
     print("="*40)
 

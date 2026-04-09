@@ -32,11 +32,14 @@ CHART_URLS = {
 }
 
 INSTRUMENTS = {
-    "XAUUSD": {"oanda": "XAU_USD", "min": 1,   "max": 10,   "decimals": 2},
-    "EURUSD": {"oanda": "EUR_USD", "min": 100,  "max": 5000, "decimals": 5},
-    "GBPUSD": {"oanda": "GBP_USD", "min": 100,  "max": 5000, "decimals": 5},
-    "USDJPY": {"oanda": "USD_JPY", "min": 100,  "max": 5000, "decimals": 3},
+    "XAUUSD": {"oanda": "XAU_USD", "min": 1,   "max": 10,   "decimals": 2,  "min_stop": 3.0},
+    "EURUSD": {"oanda": "EUR_USD", "min": 100,  "max": 5000, "decimals": 5,  "min_stop": 0.0010},
+    "GBPUSD": {"oanda": "GBP_USD", "min": 100,  "max": 5000, "decimals": 5,  "min_stop": 0.0010},
+    "USDJPY": {"oanda": "USD_JPY", "min": 100,  "max": 5000, "decimals": 3,  "min_stop": 0.100},
 }
+
+CONFIDENCE_THRESHOLD = 80
+VALID_SETUPS         = ["A+"]
 
 client = anthropic.Anthropic(api_key=ANTHROPIC_KEY)
 
@@ -166,21 +169,26 @@ def analyse_chart(screenshot_path, instrument):
         "You are looking at a " + instrument + " 1 hour chart with the HF Edge indicator.\n\n"
         "Analyse this chart using the A+ setup framework:\n\n"
         "STEP 1 - TREND BIAS:\n"
-        "- Is the overall trend bullish or bearish?\n"
-        "- Where is price relative to the EMAs (blue=21, orange=50, red=200)?\n\n"
+        "- Is the overall trend clearly bullish or bearish on this timeframe?\n"
+        "- Where is price relative to the EMAs (blue=21, orange=50, red=200)?\n"
+        "- Are all 3 EMAs aligned in the same direction?\n\n"
         "STEP 2 - MARKET STRUCTURE:\n"
-        "- What is the current 1H structure?\n"
-        "- Is price making higher highs and higher lows (bullish) or lower highs and lower lows (bearish)?\n"
-        "- Is price trending or consolidating?\n\n"
+        "- Is price making clear higher highs and higher lows (bullish)?\n"
+        "- Or clear lower highs and lower lows (bearish)?\n"
+        "- Is price in consolidation? If so this is NOT tradeable.\n\n"
         "STEP 3 - KEY LEVELS:\n"
         "- Identify nearest major support and resistance levels\n"
-        "- Are there any visible liquidity pools (equal highs or equal lows)?\n"
-        "- Has there been a recent liquidity grab (stop hunt below support or above resistance)?\n\n"
-        "STEP 4 - SETUP QUALITY:\n"
-        "- Has price made a liquidity grab and reversed?\n"
-        "- Has price broken structure in the new direction?\n"
-        "- Has there been a correction after the indication?\n"
-        "- Is there a clean entry point now?\n\n"
+        "- Are there equal highs or equal lows acting as liquidity pools?\n"
+        "- Has there been a CLEAR liquidity grab (sharp spike through a level then reversal)?\n\n"
+        "STEP 4 - A+ SETUP CRITERIA (ALL must be true for A+):\n"
+        "1. Clear trend direction on 1H\n"
+        "2. All 3 EMAs aligned with trend\n"
+        "3. Clear liquidity grab has occurred\n"
+        "4. Price has broken structure in new direction after grab\n"
+        "5. Price has corrected back after the break\n"
+        "6. Clean entry point exists right now\n"
+        "7. Risk reward is at least 2.5:1\n\n"
+        "If even ONE of these 7 criteria is missing it is NOT an A+ setup.\n\n"
         "STEP 5 - DECISION:\n"
         "Respond with EXACTLY this format and nothing else:\n\n"
         "BIAS: [BULLISH / BEARISH / NEUTRAL]\n"
@@ -188,24 +196,26 @@ def analyse_chart(screenshot_path, instrument):
         "TRADE: [YES / NO]\n"
         "DIRECTION: [LONG / SHORT / NONE]\n"
         "INSTRUMENT: [" + instrument + "]\n"
-        "ENTRY: [specific current price level - never use 0 or N/A]\n"
-        "STOP_LOSS: [specific price level - never use 0 or N/A]\n"
-        "TAKE_PROFIT_1: [specific price level - never use 0 or N/A]\n"
-        "TAKE_PROFIT_2: [specific price level - never use 0 or N/A]\n"
+        "ENTRY: [specific current price level]\n"
+        "STOP_LOSS: [specific price level]\n"
+        "TAKE_PROFIT_1: [specific price level]\n"
+        "TAKE_PROFIT_2: [specific price level]\n"
         "CONFIDENCE: [0-100]\n"
         "REASON: [two sentences maximum]\n\n"
-        "Only recommend TRADE: YES if ALL of these are true:\n"
-        "- Setup quality is A+ or A\n"
-        "- Confidence is 70 or above\n"
-        "- Risk reward is minimum 2:1\n"
-        "- There is a clear directional bias\n"
-        "- A liquidity grab has occurred and price has reversed\n\n"
-        "IMPORTANT: Always provide real price levels for ENTRY, STOP_LOSS, TAKE_PROFIT_1 and TAKE_PROFIT_2 based on what you see on the chart. Never use 0 or N/A."
+        "STRICT RULES:\n"
+        "- Only recommend TRADE: YES if setup is A+ AND confidence is 80 or above\n"
+        "- If ANY of the 7 A+ criteria are missing set SETUP_QUALITY to A or lower\n"
+        "- Never trade consolidation or ranging markets\n"
+        "- Always provide real price levels based on what you see - never use 0 or N/A\n"
+        "- For XAUUSD stop loss must be at least 3 dollars away from entry\n"
+        "- For USDJPY stop loss must be at least 0.10 away from entry\n"
+        "- For EURUSD and GBPUSD stop loss must be at least 0.0010 away from entry\n"
+        "- Risk reward must be minimum 2.5:1 or do not trade"
     )
 
     message = client.messages.create(
         model="claude-opus-4-5",
-        max_tokens=500,
+        max_tokens=600,
         messages=[
             {
                 "role": "user",
@@ -252,6 +262,24 @@ def get_balance():
     except Exception as e:
         print("Balance error: " + str(e))
         return None
+
+
+def validate_stop_distance(instrument, entry, stop_loss):
+    try:
+        inst         = INSTRUMENTS.get(instrument, {})
+        min_stop     = inst.get("min_stop", 0)
+        stop_distance = abs(float(entry) - float(stop_loss))
+
+        if stop_distance < min_stop:
+            print("Stop too close: " + str(round(stop_distance, 5)) + " minimum: " + str(min_stop))
+            return False
+
+        print("Stop distance OK: " + str(round(stop_distance, 5)))
+        return True
+
+    except Exception as e:
+        print("Stop validation error: " + str(e))
+        return False
 
 
 def calculate_units(instrument, entry, stop_loss, balance):
@@ -307,6 +335,10 @@ def place_trade(analysis):
 
         if entry in ["0", "N/A", ""] or stop_loss in ["0", "N/A", ""] or tp1 in ["0", "N/A", ""]:
             print("Invalid price levels - no trade")
+            return False
+
+        if not validate_stop_distance(instrument, entry, stop_loss):
+            print("Stop distance too small for " + instrument + " - no trade")
             return False
 
         inst_config  = INSTRUMENTS.get(instrument, {})
@@ -448,9 +480,11 @@ def run_analysis():
             print("Setup: " + quality + " | Confidence: " + str(confidence) + "% | Trade: " + str(trade_ok))
 
             trade_placed = False
-            if trade_ok and quality in ["A+", "A"] and confidence >= 70:
-                print("High quality setup - placing trade!")
+            if trade_ok and quality in VALID_SETUPS and confidence >= CONFIDENCE_THRESHOLD:
+                print("A+ setup confirmed - placing trade!")
                 trade_placed = place_trade(analysis)
+            else:
+                print("Skipped - requires A+ setup with 80%+ confidence")
 
             asyncio.run(send_report(analysis, trade_placed, screenshot_path))
 
@@ -464,6 +498,8 @@ if __name__ == "__main__":
     print("Instruments: XAUUSD EURUSD GBPUSD USDJPY")
     print("Sessions: London + New York (AEST)")
     print("Risk: 2% per trade")
+    print("Min confidence: 80%")
+    print("Setup required: A+ only")
     print("Scanning every 30 minutes")
     print("="*40)
 
